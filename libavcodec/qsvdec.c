@@ -474,7 +474,6 @@ int ff_qsv_decode_close(QSVContext *q)
     av_fifo_free(q->async_fifo);
     q->async_fifo = NULL;
 
-    av_parser_close(q->parser);
     avcodec_free_context(&q->avctx_internal);
 
     if (q->internal_session)
@@ -500,24 +499,11 @@ int ff_qsv_process_data(AVCodecContext *avctx, QSVContext *q,
             return AVERROR(ENOMEM);
 
         q->avctx_internal->codec_id = avctx->codec_id;
-
-        q->parser = av_parser_init(avctx->codec_id);
-        if (!q->parser)
-            return AVERROR(ENOMEM);
-
-        q->parser->flags |= PARSER_FLAG_COMPLETE_FRAMES;
         q->orig_pix_fmt   = AV_PIX_FMT_NONE;
     }
 
     if (!pkt->size)
         return qsv_decode(avctx, q, frame, got_frame, pkt);
-
-    /* we assume the packets are already split properly and want
-     * just the codec parameters here */
-    av_parser_parse2(q->parser, q->avctx_internal,
-                     &dummy_data, &dummy_size,
-                     pkt->data, pkt->size, pkt->pts, pkt->dts,
-                     pkt->pos);
 
     /* TODO: flush delayed frames on reinit */
 
@@ -540,7 +526,7 @@ int ff_qsv_process_data(AVCodecContext *avctx, QSVContext *q,
     return qsv_decode(avctx, q, frame, got_frame, pkt);
 
 reinit_fail:
-    q->orig_pix_fmt = q->parser->format = avctx->pix_fmt = AV_PIX_FMT_NONE;
+    q->orig_pix_fmt = avctx->pix_fmt = AV_PIX_FMT_NONE;
     return ret;
 }
 
