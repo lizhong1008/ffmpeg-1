@@ -15,6 +15,7 @@ version <next>:
 - hymt decoder
 - anlmdn filter
 - Intel QSV-accelerated MJPEG decoding
+- Intel QSV-accelerated VP9 decoding
 
 
 version 4.1:
