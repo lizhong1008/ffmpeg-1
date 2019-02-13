@@ -120,30 +120,18 @@ static inline unsigned int qsv_fifo_size(const AVFifoBuffer* fifo)
     return av_fifo_size(fifo) / qsv_fifo_item_size();
 }
 
-static int qsv_decode_init(AVCodecContext *avctx, QSVContext *q, AVPacket *avpkt)
+static int qsv_decode_preinit(AVCodecContext *avctx, QSVContext *q, enum AVPixelFormat *pix_fmts, mfxVideoParam *param)
 {
-    const AVPixFmtDescriptor *desc;
     mfxSession session = NULL;
     int iopattern = 0;
-    mfxVideoParam param = { 0 };
-    int frame_width  = avctx->coded_width;
-    int frame_height = avctx->coded_height;
     int ret;
-    mfxBitstream bs = { { { 0 } } };
 
-    if (avpkt->size) {
-        bs.Data       = avpkt->data;
-        bs.DataLength = avpkt->size;
-        bs.MaxLength  = bs.DataLength;
-        bs.TimeStamp  = avpkt->pts;
-        if (avctx->field_order == AV_FIELD_PROGRESSIVE)
-            bs.DataFlag   |= MFX_BITSTREAM_COMPLETE_FRAME;
+    ret = ff_get_format(avctx, pix_fmts);
+    if (ret < 0) {
+        q->orig_pix_fmt = avctx->pix_fmt = AV_PIX_FMT_NONE;
+        return ret;
     } else
-        return AVERROR_INVALIDDATA;
-
-    desc = av_pix_fmt_desc_get(avctx->sw_pix_fmt);
-    if (!desc)
-        return AVERROR_BUG;
+        q->orig_pix_fmt = pix_fmts[1];
 
     if (!q->async_fifo) {
         q->async_fifo = av_fifo_alloc(q->async_depth * qsv_fifo_item_size());
@@ -181,35 +169,74 @@ static int qsv_decode_init(AVCodecContext *avctx, QSVContext *q, AVPacket *avpkt
         return ret;
     }
 
-    ret = ff_qsv_codec_id_to_mfx(avctx->codec_id);
-    if (ret < 0)
-        return ret;
+    param->IOPattern   = q->iopattern;
+    param->AsyncDepth  = q->async_depth;
+    param->ExtParam    = q->ext_buffers;
+    param->NumExtParam = q->nb_ext_buffers;
 
-    param.mfx.CodecId = ret;
-    ret = MFXVideoDECODE_DecodeHeader(q->session, &bs, &param);
-    if (ret < 0)
-        return ff_qsv_print_error(avctx, ret,
-                "Error decoding stream header");
+    return 0;
+ }
 
-    avctx->width        = param.mfx.FrameInfo.CropW;
-    avctx->height       = param.mfx.FrameInfo.CropH;
-    avctx->coded_width  = param.mfx.FrameInfo.Width;
-    avctx->coded_height = param.mfx.FrameInfo.Height;
-    avctx->level        = param.mfx.CodecProfile;
-    avctx->profile      = param.mfx.CodecLevel;
-    avctx->field_order  = ff_qsv_map_picstruct(param.mfx.FrameInfo.PicStruct);
+static int qsv_decode_init(AVCodecContext *avctx, QSVContext *q, mfxVideoParam *param)
+{
+    mfxSession session = NULL;
+    int iopattern = 0;
+    int ret;
 
-    param.IOPattern   = q->iopattern;
-    param.AsyncDepth  = q->async_depth;
-    param.ExtParam    = q->ext_buffers;
-    param.NumExtParam = q->nb_ext_buffers;
+    avctx->width        = param->mfx.FrameInfo.CropW;
+    avctx->height       = param->mfx.FrameInfo.CropH;
+    avctx->coded_width  = param->mfx.FrameInfo.Width;
+    avctx->coded_height = param->mfx.FrameInfo.Height;
+    avctx->level        = param->mfx.CodecLevel;
+    avctx->profile      = param->mfx.CodecProfile;
+    avctx->field_order  = ff_qsv_map_picstruct(param->mfx.FrameInfo.PicStruct);
+    avctx->pix_fmt      = ff_qsv_map_fourcc(param->mfx.FrameInfo.FourCC);
 
-    ret = MFXVideoDECODE_Init(q->session, &param);
+    ret = MFXVideoDECODE_Init(q->session, param);
     if (ret < 0)
         return ff_qsv_print_error(avctx, ret,
                                   "Error initializing the MFX video decoder");
 
-    q->frame_info = param.mfx.FrameInfo;
+    q->frame_info = param->mfx.FrameInfo;
+
+    return 0;
+}
+
+static int qsv_decode_header(AVCodecContext *avctx, QSVContext *q, AVPacket *avpkt, enum AVPixelFormat *pix_fmts, mfxVideoParam *param)
+{
+    int ret;
+
+    mfxBitstream bs = { { { 0 } } };
+
+    if (avpkt->size) {
+        bs.Data       = avpkt->data;
+        bs.DataLength = avpkt->size;
+        bs.MaxLength  = bs.DataLength;
+        bs.TimeStamp  = avpkt->pts;
+        if (avctx->field_order == AV_FIELD_PROGRESSIVE)
+            bs.DataFlag   |= MFX_BITSTREAM_COMPLETE_FRAME;
+    } else
+        return AVERROR_INVALIDDATA;
+
+
+    if(!q->session) {
+        ret = qsv_decode_preinit(avctx, q, pix_fmts, param);
+        if (ret < 0)
+            return ret;
+    }
+
+    ret = ff_qsv_codec_id_to_mfx(avctx->codec_id);
+    if (ret < 0)
+        return ret;
+
+    param->mfx.CodecId = ret;
+    ret = MFXVideoDECODE_DecodeHeader(q->session, &bs, param);
+    if (MFX_ERR_MORE_DATA == ret) {
+       return AVERROR(EAGAIN);
+    }
+    if (ret < 0)
+        return ff_qsv_print_error(avctx, ret,
+                "Error decoding stream header");
 
     return 0;
 }
@@ -492,6 +519,11 @@ int ff_qsv_process_data(AVCodecContext *avctx, QSVContext *q,
     int dummy_size;
     int ret;
     const AVPixFmtDescriptor *desc;
+    mfxVideoParam param = { 0 };
+    static enum AVPixelFormat pix_fmts[3] = { AV_PIX_FMT_QSV,
+                                              AV_PIX_FMT_NV12,
+                                              AV_PIX_FMT_NONE };
+
 
     if (!q->avctx_internal) {
         q->avctx_internal = avcodec_alloc_context3(NULL);
@@ -507,17 +539,23 @@ int ff_qsv_process_data(AVCodecContext *avctx, QSVContext *q,
 
     /* TODO: flush delayed frames on reinit */
 
-    if (!q->initialized){
-        enum AVPixelFormat pix_fmts[3] = { AV_PIX_FMT_QSV,
-                                           AV_PIX_FMT_NV12,
-                                           AV_PIX_FMT_NONE };
-        ret = ff_get_format(avctx, pix_fmts);
+    ret = qsv_decode_header(avctx, q, pkt, pix_fmts, &param);
+
+    if (ret >= 0 && (q->orig_pix_fmt != ff_qsv_map_fourcc(param.mfx.FrameInfo.FourCC) ||
+        avctx->coded_width  != param.mfx.FrameInfo.Width ||
+        avctx->coded_height != param.mfx.FrameInfo.Height)) {
+        avctx->pix_fmt = pix_fmts[1]  = ff_qsv_map_fourcc(param.mfx.FrameInfo.FourCC);
+        avctx->coded_width  = param.mfx.FrameInfo.Width;
+        avctx->coded_height = param.mfx.FrameInfo.Height;
+        
+        ret = qsv_decode_preinit(avctx, q, pix_fmts, &param);
         if (ret < 0)
             goto reinit_fail;
+        q->initialized = 0;
+    }
 
-        avctx->pix_fmt = ret;
-
-        ret = qsv_decode_init(avctx, q, pkt);
+    if (!q->initialized) {
+        ret = qsv_decode_init(avctx, q, &param);
         if (ret < 0)
             goto reinit_fail;
         q->initialized = 1;
