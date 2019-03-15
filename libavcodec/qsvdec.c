@@ -120,11 +120,15 @@ static inline unsigned int qsv_fifo_size(const AVFifoBuffer* fifo)
     return av_fifo_size(fifo) / qsv_fifo_item_size();
 }
 
-static int qsv_decode_preinit(AVCodecContext *avctx, QSVContext *q, enum AVPixelFormat *pix_fmts, mfxVideoParam *param)
+static int qsv_decode_preinit(AVCodecContext *avctx, QSVContext *q, enum AVPixelFormat pix_fmt, mfxVideoParam *param)
 {
     mfxSession session = NULL;
     int iopattern = 0;
     int ret;
+    enum AVPixelFormat pix_fmts[3] = {
+        AV_PIX_FMT_QSV, /* opaque format in case of video memory output */
+        pix_fmt,        /* system memory format obtained from bitstream parser */
+        AV_PIX_FMT_NONE };
 
     ret = ff_get_format(avctx, pix_fmts);
     if (ret < 0) {
@@ -199,7 +203,7 @@ static int qsv_decode_init(AVCodecContext *avctx, QSVContext *q, mfxVideoParam *
     return 0;
 }
 
-static int qsv_decode_header(AVCodecContext *avctx, QSVContext *q, AVPacket *avpkt, enum AVPixelFormat *pix_fmts, mfxVideoParam *param)
+static int qsv_decode_header(AVCodecContext *avctx, QSVContext *q, AVPacket *avpkt, enum AVPixelFormat pix_fmt, mfxVideoParam *param)
 {
     int ret;
 
@@ -217,7 +221,7 @@ static int qsv_decode_header(AVCodecContext *avctx, QSVContext *q, AVPacket *avp
 
 
     if(!q->session) {
-        ret = qsv_decode_preinit(avctx, q, pix_fmts, param);
+        ret = qsv_decode_preinit(avctx, q, pix_fmt, param);
         if (ret < 0)
             return ret;
     }
@@ -512,9 +516,7 @@ int ff_qsv_process_data(AVCodecContext *avctx, QSVContext *q,
 {
     int ret;
     mfxVideoParam param = { 0 };
-    enum AVPixelFormat pix_fmts[3] = { AV_PIX_FMT_QSV,
-                                       AV_PIX_FMT_NV12,
-                                       AV_PIX_FMT_NONE };
+    enum AVPixelFormat pix_fmt = AV_PIX_FMT_NV12;
 
     if (!pkt->size)
         return qsv_decode(avctx, q, frame, got_frame, pkt);
@@ -523,9 +525,9 @@ int ff_qsv_process_data(AVCodecContext *avctx, QSVContext *q,
 
     // sw_pix_fmt was initialized as NV12, will be updated after header decoded if not true.
     if (q->orig_pix_fmt != AV_PIX_FMT_NONE)
-        pix_fmts[1] = q->orig_pix_fmt;
+        pix_fmt = q->orig_pix_fmt;
 
-    ret = qsv_decode_header(avctx, q, pkt, pix_fmts, &param);
+    ret = qsv_decode_header(avctx, q, pkt, pix_fmt, &param);
 
     if (ret >= 0 && (q->orig_pix_fmt != ff_qsv_map_fourcc(param.mfx.FrameInfo.FourCC) ||
         avctx->coded_width  != param.mfx.FrameInfo.Width ||
@@ -540,12 +542,12 @@ int ff_qsv_process_data(AVCodecContext *avctx, QSVContext *q,
         }
         q->reinit_flag = 0;
 
-        q->orig_pix_fmt = avctx->pix_fmt = pix_fmts[1] = ff_qsv_map_fourcc(param.mfx.FrameInfo.FourCC);
+        q->orig_pix_fmt = avctx->pix_fmt = pix_fmt = ff_qsv_map_fourcc(param.mfx.FrameInfo.FourCC);
 
         avctx->coded_width  = param.mfx.FrameInfo.Width;
         avctx->coded_height = param.mfx.FrameInfo.Height;
 
-        ret = qsv_decode_preinit(avctx, q, pix_fmts, &param);
+        ret = qsv_decode_preinit(avctx, q, pix_fmt, &param);
         if (ret < 0)
             goto reinit_fail;
         q->initialized = 0;
