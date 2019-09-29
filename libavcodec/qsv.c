@@ -576,6 +576,16 @@ static mfxStatus qsv_frame_alloc(mfxHDL pthis, mfxFrameAllocRequest *req,
             return MFX_ERR_MEMORY_ALLOC;
         }
     } else if (req->Type & MFX_MEMTYPE_INTERNAL_FRAME) {
+	/* MFX_MAKEFOURCC('V','P','8','S') is used for MFX_FOURCC_VP9_SEGMAP surface
+	 * in MSDK and this surface is an internal surface. The external allocator
+	 * shouldn't be used for this surface allocation.
+         * Return UNSUPPORTED and force MSDK allocates surface using the internal allocator
+	 *
+	 * See https://github.com/Intel-Media-SDK/MediaSDK/issues/762
+	 */
+        if (req->Info.FourCC == MFX_MAKEFOURCC ('V', 'P', '8', 'S')) {
+            return MFX_ERR_UNSUPPORTED;
+        }
         /* internal frames -- allocate a new hw frames context */
         AVHWFramesContext *ext_frames_ctx = (AVHWFramesContext*)ctx->hw_frames_ctx->data;
         mfxFrameInfo      *i  = &req->Info;
